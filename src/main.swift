@@ -1,6 +1,25 @@
 import AppKit
 import UniformTypeIdentifiers
 
+let arguments = CommandLine.arguments
+let explicitApplication: URL? = {
+    guard let index = arguments.firstIndex(of: "--libreoffice"), index + 1 < arguments.count else { return nil }
+    return URL(fileURLWithPath: arguments[index + 1])
+}()
+
+if arguments.contains("--print-engine") {
+    let executable = LibreOfficeLocator.current(overrideApplication: explicitApplication)
+    let result: [String: Any] = [
+        "mode": LibreOfficeLocator.usesBundledEngine() ? "bundled" : "external",
+        "found": executable != nil,
+        "executable": executable?.path ?? ""
+    ]
+    let output = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+    FileHandle.standardOutput.write(output)
+    FileHandle.standardOutput.write(Data("\n".utf8))
+    exit(executable == nil ? 1 : 0)
+}
+
 // Inspect the same bundle localization used by the UI, without opening a window.
 if CommandLine.arguments.contains("--print-localization") {
     let url = Bundle.main.url(forResource: "Localizable", withExtension: "strings")!
@@ -31,7 +50,7 @@ if CommandLine.arguments.contains("--print-localization") {
 // This mode is useful for repeatable integration checks of the shipped bundle.
 if let modeIndex = CommandLine.arguments.firstIndex(of: "--convert") {
     let paths = Array(CommandLine.arguments.dropFirst(modeIndex + 1))
-    let converter = Converter()
+    let converter = Converter(applicationURL: explicitApplication)
     let results: [ConversionResult] = paths.map { path in
         do {
             let result = try converter.convert(URL(fileURLWithPath: path))
@@ -168,6 +187,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let openItem = NSMenuItem(title: L("menu.open"), action: #selector(selectFiles), keyEquivalent: "o")
         openItem.target = self
         fileMenu.addItem(openItem)
+        if !LibreOfficeLocator.usesBundledEngine() {
+            let locate = NSMenuItem(title: L("menu.locate_engine"), action: #selector(locateLibreOffice), keyEquivalent: "")
+            locate.target = self
+            fileMenu.addItem(locate)
+        }
         fileMenu.addItem(withTitle: L("menu.close"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         files.submenu = fileMenu
         bar.addItem(files)
@@ -204,6 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let icon = NSImageView(image: NSImage(contentsOf: iconURL)!)
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.heightAnchor.constraint(equalToConstant: 58).isActive = true
+        icon.widthAnchor.constraint(equalToConstant: 58).isActive = true
         stack.addArrangedSubview(icon)
         let title = NSTextField(labelWithString: L("window.headline"))
         title.font = .systemFont(ofSize: 23, weight: .semibold)
@@ -258,7 +283,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         note.font = .systemFont(ofSize: 11)
         note.textColor = .tertiaryLabelColor
         stack.addArrangedSubview(note)
+        if !LibreOfficeLocator.usesBundledEngine(), LibreOfficeLocator.current() == nil {
+            status.stringValue = L("status.engine_required")
+        }
         window.makeKeyAndOrderFront(nil)
+    }
+    @objc func locateLibreOffice() {
+        let panel = NSOpenPanel()
+        panel.title = L("engine.panel_title")
+        panel.message = L("engine.panel_hint")
+        panel.prompt = L("engine.panel_prompt")
+        panel.allowedContentTypes = [.application]
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let selected = panel.url else { return }
+            guard LibreOfficeLocator.isStandaloneInstallation(selected),
+                  LibreOfficeLocator.executable(in: selected) != nil else {
+                let alert = NSAlert()
+                alert.messageText = L("engine.invalid_title")
+                alert.informativeText = L("error.invalid_engine")
+                alert.addButton(withTitle: L("ok"))
+                alert.beginSheetModal(for: self.window)
+                return
+            }
+            UserDefaults.standard.set(selected.path, forKey: LibreOfficeLocator.preferenceKey)
+            if self.outstanding == 0 { self.status.stringValue = L("status.engine_ready") }
+        }
     }
     @objc func selectFiles() {
         let panel = NSOpenPanel()
@@ -346,7 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApplication.shared.orderFrontStandardAboutPanel(options: [
             .applicationName: L("app.name"),
             .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
-            .credits: NSAttributedString(string: L("about.credits"))
+            .credits: NSAttributedString(string: L(LibreOfficeLocator.usesBundledEngine() ? "about.credits.bundled" : "about.credits"))
         ])
     }
 }

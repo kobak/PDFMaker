@@ -19,8 +19,10 @@ from pypdf import PdfReader
 
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser()
-parser.add_argument('--app', type=Path, default=root/'dist/PDF Maker.app')
-parser.add_argument('--report', type=Path, default=root/'dist/verification.json')
+version = (root/'VERSION').read_text().strip()
+parser.add_argument('--app', type=Path, default=root/'dist'/version/'lite/PDF Maker.app')
+parser.add_argument('--libreoffice', type=Path, help='External LibreOffice.app used for integration tests; does not change saved preferences')
+parser.add_argument('--report', type=Path, default=root/'dist'/version/'release/verification-Lite.json')
 args = parser.parse_args()
 app = args.app.resolve()
 binary = app/'Contents/MacOS/PDFConverter'
@@ -31,14 +33,17 @@ def check(name, condition):
         raise AssertionError(name)
     checks.append(name)
 
-def run(languages, mode, *paths, success=True):
-    result = subprocess.run([str(binary), '-AppleLanguages', '(' + ','.join(languages) + ')',
-                             mode, *map(str, paths)], capture_output=True, text=True, timeout=100)
+def run(languages, mode, *paths, success=True, application=args.libreoffice):
+    command = [str(binary), '-AppleLanguages', '(' + ','.join(languages) + ')']
+    if application is not None:
+        command += ['--libreoffice', str(application.resolve())]
+    result = subprocess.run(command + [mode, *map(str, paths)], capture_output=True, text=True, timeout=100)
     if (result.returncode == 0) != success:
         raise AssertionError((result.returncode, result.stdout, result.stderr))
     return json.loads(result.stdout)
 
 info = plistlib.loads((app/'Contents/Info.plist').read_bytes())
+bundled = info.get('PDFMakerEngineMode') == 'bundled'
 check('Release version matches VERSION', info['CFBundleShortVersionString'] == (root/'VERSION').read_text().strip())
 check('English fallback and Hungarian support declared',
       info['CFBundleDevelopmentRegion'] == 'en' and info['CFBundleLocalizations'] == ['en','hu'])
@@ -90,7 +95,9 @@ with tempfile.TemporaryDirectory(prefix='pdfmaker-test-') as temporary:
     document.add_heading('Második oldal',1)
     document.add_paragraph('A kifejezett oldaltörés megmarad.')
     document.save(docx)
-    engine = app/'Contents/Resources/ConverterEngine.app/Contents/MacOS/soffice'
+    engine_status = run(['en'], '--print-engine')
+    engine = Path(engine_status['executable'])
+    check('Configured conversion engine is available', engine_status['found'] and engine.is_file())
     conversion = subprocess.run([str(engine),'-env:UserInstallation='+(folder/'profile').as_uri(),
         '--headless','--nologo','--norestore','--convert-to','doc:MS Word 97','--outdir',str(folder),str(docx)],
         capture_output=True,text=True,timeout=90)
@@ -134,6 +141,13 @@ with tempfile.TemporaryDirectory(prefix='pdfmaker-test-') as temporary:
         check(language+': damaged file error is translated',values[1]['error']==catalogs[language]['strings']['error.conversion'])
         check(language+': missing file error is translated',values[4]['error']==catalogs[language]['strings']['error.unreadable'])
     check('Invalid inputs produce no PDFs',all(not p.with_suffix('.pdf').exists() for p in [empty,damaged,disguised,unsupported,missing]))
+    if not bundled:
+        for language in ['en','hu']:
+            value = run([language], '--convert', docx, success=False, application=folder/'Not Installed.app')[0]
+            check(language+': missing LibreOffice has a translated installation hint',
+                  value['error'] == catalogs[language]['strings']['error.engine_missing'])
+        value = run(['en'], '--print-engine', success=False, application=folder/'Not Installed.app')
+        check('Invalid explicit location never falls back to another app', value['mode']=='external' and not value['found'])
     special=folder/"Upper 'quote' $name;.DOCX"; special.write_bytes(docx.read_bytes())
     check('Uppercase extension and shell metacharacters are literal',run(['en'],'--convert',special)[0].get('pages')==2)
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -142,14 +156,26 @@ with tempfile.TemporaryDirectory(prefix='pdfmaker-test-') as temporary:
 
 subprocess.run(['codesign','--verify','--deep','--strict',str(app)],check=True)
 check('Deep strict code signature verification',True)
-engine_info=plistlib.loads((app/'Contents/Resources/ConverterEngine.app/Contents/Info.plist').read_bytes())
+engine_info=plistlib.loads((engine.parents[2]/'Contents/Info.plist').read_bytes())
 engine_config=json.loads((root/'scripts/engine.json').read_text())
-check('Official engine version matches pinned provenance',engine_info['CFBundleShortVersionString']==engine_config['version'])
-check('Original embedded license notices preserved',all((app/'Contents/Resources/ConverterEngine.app/Contents/Resources'/p).exists() for p in ['LICENSE','NOTICE']))
+if bundled:
+    check('Official bundled engine version matches pinned provenance',engine_info['CFBundleShortVersionString']==engine_config['version'])
+    check('Original embedded license notices preserved',all((app/'Contents/Resources/ConverterEngine.app/Contents/Resources'/p).exists() for p in ['LICENSE','NOTICE']))
+else:
+    check('Lite uses an external engine', engine_status['mode']=='external' and not str(engine).startswith(str(app)+'/'))
+    check('No LibreOffice runtime is packaged', not (app/'Contents/Resources/ConverterEngine.app').exists())
+    app_bytes = sum(p.stat().st_size for p in app.rglob('*') if p.is_file() and not p.is_symlink())
+    check('Lite application is smaller than 5 MiB', app_bytes < 5*1024*1024)
+with tempfile.TemporaryDirectory(prefix='pdfmaker-locator-build-') as temporary:
+    locator_test = Path(temporary)/'locator-checks'
+    subprocess.run(['xcrun','swiftc','-swift-version','5','-framework','AppKit',
+                    str(root/'src/LibreOfficeLocator.swift'),str(root/'tests/locator.swift'),'-o',str(locator_test)],check=True)
+    locator_results = json.loads(subprocess.check_output([str(locator_test)],text=True))
+    checks.extend(locator_results['checks'])
 check('Icon preview is exactly 1024 square',Image.open(root/'assets/icon.png').size==(1024,1024))
 report={
     'version':info['CFBundleShortVersionString'],'checks_passed':len(checks),'checks':checks,
-    'engine_version':engine_config['version'],'engine_download_sha256':engine_config['sha256'],
+    'engine_mode':'bundled' if bundled else 'external','engine_version_tested':engine_info['CFBundleShortVersionString'],
     'supported_languages':['en','hu'],'default_language':'en',
     'interactive_ui_verified':False,'apple_notarized':False,
     'interactive_ui_limitation':'No interactive GUI check: Computer Use permission was unavailable.'

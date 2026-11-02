@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0
+
+- Small Lite build uses a separately installed LibreOffice; no conversion engine is packaged.
+- Finds system, personal and registered LibreOffice applications.
+- File → Locate LibreOffice supports custom locations and remembers the selection.
+- English and Hungarian installation hints when LibreOffice is missing.
+- Isolated temporary profiles preserve the user's LibreOffice settings and open documents.
+- Versioned build directories and separate Lite/Full disk image names preserve old releases.
+- Optional Full builds and the self-contained 1.2.0 release remain available.
+
 ## 1.2.0
 
 First public release.

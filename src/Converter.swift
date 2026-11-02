@@ -19,12 +19,13 @@ enum ConversionError: LocalizedError {
 
 /// A UI and the command-line verification path use exactly the same converter.
 struct Converter {
-    let engineURL: URL
+    let engineURL: URL?
+    let usesBundledEngine: Bool
     let timeout: TimeInterval
 
-    init(bundle: Bundle = .main, timeout: TimeInterval = 90) {
-        engineURL = bundle.bundleURL.appendingPathComponent(
-            "Contents/Resources/ConverterEngine.app/Contents/MacOS/soffice")
+    init(bundle: Bundle = .main, timeout: TimeInterval = 90, applicationURL: URL? = nil) {
+        engineURL = LibreOfficeLocator.current(in: bundle, overrideApplication: applicationURL)
+        usesBundledEngine = LibreOfficeLocator.usesBundledEngine(in: bundle)
         self.timeout = timeout
     }
 
@@ -50,8 +51,8 @@ struct Converter {
         guard isOLE || (source.pathExtension.lowercased() == "docx" ? isZIP : isRTF) else {
             throw ConversionError.message(L("error.invalid"))
         }
-        guard fm.isExecutableFile(atPath: engineURL.path) else {
-            throw ConversionError.message(L("error.engine_missing"))
+        guard let engineURL, fm.isExecutableFile(atPath: engineURL.path) else {
+            throw ConversionError.message(L(usesBundledEngine ? "error.bundled_engine_missing" : "error.engine_missing"))
         }
 
         let workspace = fm.temporaryDirectory.appendingPathComponent("pdf-keszito-\(UUID().uuidString)", isDirectory: true)
